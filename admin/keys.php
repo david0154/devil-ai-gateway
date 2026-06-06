@@ -2,72 +2,28 @@
 require_once __DIR__ . '/../api/config.php';
 session_start();
 if (!isset($_SESSION['admin'])) { header('Location: index.php'); exit; }
-
 $db = getDB();
 $msg = '';
-
-// Create key
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create'])) {
-    $name  = trim($_POST['name'] ?? '');
-    $email = trim($_POST['email'] ?? '');
-    $limit = intval($_POST['limit'] ?? 100);
-    if ($name && $email) {
-        $key = 'dk_live_' . bin2hex(random_bytes(16));
-        $db->prepare("INSERT IGNORE INTO api_keys (name,email,api_key,limit_per_day,last_reset) VALUES(?,?,?,?,CURDATE())")
-           ->execute([$name, $email, $key, $limit]);
-        $msg = "✅ Key created: <code>$key</code>";
-    }
+    $clientName = trim($_POST['client_name'] ?? '');
+    $clientEmail = trim($_POST['client_email'] ?? '');
+    $appName = trim($_POST['app_name'] ?? '');
+    $planName = trim($_POST['plan_name'] ?? 'Starter');
+    $amount = floatval($_POST['subscription_amount_inr'] ?? 0);
+    $speedTier = strtolower(trim($_POST['speed_tier'] ?? 'normal'));
+    $limitPerDay = intval($_POST['limit_per_day'] ?? 100);
+    $validDays = intval($_POST['valid_days'] ?? 30);
+    $rpmLimit = intval($_POST['rpm_limit'] ?? 0);
+    $tier = speedTierConfig($speedTier);
+    if ($rpmLimit <= 0) $rpmLimit = $tier['rpm'];
+    $timeout = $tier['timeout'];
+    $key = generateApiKey();
+    $expiresAt = date('Y-m-d H:i:s', strtotime('+' . max(1, $validDays) . ' days'));
+    $db->prepare("INSERT INTO api_keys (name,email,client_name,client_email,app_name,api_key,subscription_amount_inr,currency,plan_name,speed_tier,rpm_limit,timeout_seconds,limit_per_day,expires_at,last_reset,is_active) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURDATE(),1)")
+       ->execute([$clientName,$clientEmail,$clientName,$clientEmail,$appName,$key,$amount,'INR',$planName,$speedTier,$rpmLimit,$timeout,$limitPerDay,$expiresAt]);
+    $msg = "✅ API key created: <code>$key</code>";
 }
-
-// Toggle active
-if (isset($_GET['toggle'])) {
-    $db->prepare("UPDATE api_keys SET is_active = 1 - is_active WHERE id=?")->execute([$_GET['toggle']]);
-    header('Location: keys.php'); exit;
-}
-
-// Delete key
-if (isset($_GET['delete'])) {
-    $db->prepare("DELETE FROM api_keys WHERE id=?")->execute([$_GET['delete']]);
-    header('Location: keys.php'); exit;
-}
-
-$keys = $db->query("SELECT * FROM api_keys ORDER BY created_at DESC")->fetchAll(PDO::FETCH_ASSOC);
+if (isset($_GET['toggle'])) { $db->prepare("UPDATE api_keys SET is_active = 1 - is_active WHERE id = ?")->execute([$_GET['toggle']]); header('Location: keys.php'); exit; }
+$rows = $db->query("SELECT * FROM api_keys ORDER BY created_at DESC LIMIT 100")->fetchAll(PDO::FETCH_ASSOC);
 ?>
-<!DOCTYPE html><html><head><title>API Keys — Devil AI</title>
-<style>
-body{font-family:sans-serif;background:#0a0a0a;color:#eee;padding:30px;}
-h1{color:#ff4444;} a{color:#ff4444;}
-form{background:#111;padding:20px;border-radius:8px;border:1px solid #333;max-width:500px;margin-bottom:30px;}
-input{width:100%;padding:8px;background:#222;border:1px solid #444;color:#fff;border-radius:4px;margin:5px 0 10px;box-sizing:border-box;}
-.btn{background:#ff4444;color:#fff;border:none;padding:10px 20px;cursor:pointer;border-radius:5px;}
-table{width:100%;border-collapse:collapse;} th{background:#ff4444;color:#fff;padding:8px;text-align:left;font-size:13px;}
-td{padding:8px;border-bottom:1px solid #222;font-size:12px;} .badge{padding:2px 7px;border-radius:3px;font-size:11px;}
-.active{background:#1a4a2a;color:#00ff88;} .inactive{background:#4a1a1a;color:#ff4444;}
-</style></head><body>
-<p><a href="index.php">← Dashboard</a></p>
-<h1>🔑 API Key Management</h1>
-<?php if ($msg) echo "<p style='color:#00ff88'>$msg</p>"; ?>
-<form method="POST">
-<label>Name</label><input name="name" required placeholder="Client name">
-<label>Email</label><input name="email" type="email" required placeholder="client@example.com">
-<label>Daily Limit</label><input name="limit" type="number" value="100">
-<button class="btn" name="create">Generate API Key</button>
-</form>
-<table>
-<tr><th>Name</th><th>Email</th><th>API Key</th><th>Daily Limit</th><th>Today</th><th>Status</th><th>Actions</th></tr>
-<?php foreach ($keys as $k): ?>
-<tr>
-<td><?= htmlspecialchars($k['name']) ?></td>
-<td><?= htmlspecialchars($k['email']) ?></td>
-<td style="font-family:monospace;font-size:11px"><?= htmlspecialchars($k['api_key']) ?></td>
-<td><?= $k['limit_per_day'] ?></td>
-<td><?= $k['requests_today'] ?></td>
-<td><span class="badge <?= $k['is_active'] ? 'active' : 'inactive' ?>"><?= $k['is_active'] ? 'Active' : 'Inactive' ?></span></td>
-<td>
-    <a href="?toggle=<?= $k['id'] ?>"><?= $k['is_active'] ? 'Disable' : 'Enable' ?></a> |
-    <a href="?delete=<?= $k['id'] ?>" onclick="return confirm('Delete?')">Delete</a>
-</td>
-</tr>
-<?php endforeach; ?>
-</table>
-</body></html>
+<!DOCTYPE html><html><head><title>Manage Keys</title><style>body{font-family:Arial;background:#0b1020;color:#e5e7eb;padding:24px}a{color:#f87171}.card{background:#111827;border:1px solid #1f2937;border-radius:14px;padding:20px;margin-bottom:20px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}label{display:block;font-size:12px;color:#94a3b8;margin-bottom:6px}input,select{width:100%;padding:11px;background:#0f172a;border:1px solid #334155;color:#fff;border-radius:8px;box-sizing:border-box}.btn{background:#ef4444;color:#fff;border:none;padding:12px 18px;border-radius:8px;cursor:pointer;font-weight:700}table{width:100%;border-collapse:collapse;background:#111827;border:1px solid #1f2937}th,td{padding:10px;border-bottom:1px solid #1f2937;font-size:12px;text-align:left}@media(max-width:800px){.grid{grid-template-columns:1fr}}</style></head><body><p><a href="index.php">← Dashboard</a></p><div class="card"><h2>Create Client API Key</h2><?php if($msg) echo '<p>'.$msg.'</p>'; ?><form method="post"><div class="grid"><div><label>Client Name</label><input name="client_name" required></div><div><label>Client Email</label><input type="email" name="client_email" required></div><div><label>App Name</label><input name="app_name" required></div><div><label>Plan Name</label><input name="plan_name" value="Starter"></div><div><label>Subscription Amount (INR)</label><input type="number" step="0.01" name="subscription_amount_inr" value="499"></div><div><label>Speed Tier</label><select name="speed_tier"><option>slow</option><option selected>normal</option><option>fast</option><option>ultra</option></select></div><div><label>RPM Limit</label><input type="number" name="rpm_limit" value="30"></div><div><label>Daily Limit</label><input type="number" name="limit_per_day" value="1000"></div><div><label>Valid Days</label><input type="number" name="valid_days" value="30"></div></div><p style="margin-top:14px"><button class="btn" name="create">Generate API Key</button></p></form></div><table><tr><th>App</th><th>Client</th><th>Email</th><th>Plan</th><th>Amount</th><th>Speed</th><th>RPM</th><th>Daily</th><th>Expiry</th><th>API Key</th><th>Action</th></tr><?php foreach($rows as $r): ?><tr><td><?= htmlspecialchars($r['app_name']) ?></td><td><?= htmlspecialchars($r['client_name']) ?></td><td><?= htmlspecialchars($r['client_email']) ?></td><td><?= htmlspecialchars($r['plan_name']) ?></td><td>₹<?= number_format((float)$r['subscription_amount_inr'],2) ?></td><td><?= htmlspecialchars($r['speed_tier']) ?></td><td><?= (int)$r['rpm_limit'] ?></td><td><?= (int)$r['limit_per_day'] ?></td><td><?= htmlspecialchars((string)$r['expires_at']) ?></td><td style="font-family:monospace"><?= htmlspecialchars($r['api_key']) ?></td><td><a href="?toggle=<?= $r['id'] ?>"><?= (int)$r['is_active']===1?'Disable':'Enable' ?></a></td></tr><?php endforeach; ?></table></body></html>

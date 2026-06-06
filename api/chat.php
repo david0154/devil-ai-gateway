@@ -1,211 +1,184 @@
 <?php
-// ============================================
-// Devil AI Gateway — /v1/chat endpoint
-// ============================================
-
 require_once __DIR__ . '/config.php';
-
-// --- Validate API Key ---
-$apiKey = $_SERVER['HTTP_X_API_KEY'] ?? '';
-if (empty($apiKey)) {
-    http_response_code(401);
-    echo json_encode(['error' => 'Missing X-API-Key header']);
-    exit;
-}
 
 try {
     $db = getDB();
-
-    // Reset daily count if new day
-    $db->prepare("UPDATE api_keys SET requests_today=0 WHERE last_reset < CURDATE() OR last_reset IS NULL")->execute();
-    $db->prepare("UPDATE api_keys SET last_reset=CURDATE() WHERE last_reset < CURDATE() OR last_reset IS NULL")->execute();
-
-    $stmt = $db->prepare("SELECT * FROM api_keys WHERE api_key=? AND is_active=1");
-    $stmt->execute([$apiKey]);
-    $keyData = $stmt->fetch(PDO::FETCH_ASSOC);
-
-    if (!$keyData) {
-        http_response_code(401);
-        echo json_encode(['error' => 'Invalid or inactive API key']);
-        exit;
-    }
-
-    if ($keyData['requests_today'] >= $keyData['limit_per_day']) {
-        http_response_code(429);
-        echo json_encode(['error' => 'Daily rate limit exceeded', 'limit' => $keyData['limit_per_day']]);
-        exit;
-    }
-
+    ensureRequestCountersReset($db);
 } catch (Exception $e) {
-    http_response_code(500);
-    echo json_encode(['error' => 'Database error: ' . $e->getMessage()]);
-    exit;
+    jsonResponse(['error' => 'Database error: ' . $e->getMessage()], 500);
 }
 
-// --- Parse Request Body ---
-$body   = json_decode(file_get_contents('php://input'), true);
+$apiKey = $_SERVER['HTTP_X_API_KEY'] ?? '';
+if (!$apiKey) {
+    jsonResponse(['error' => 'Missing X-API-Key header'], 401);
+}
+
+$stmt = $db->prepare("SELECT * FROM api_keys WHERE api_key = ? LIMIT 1");
+$stmt->execute([$apiKey]);
+$keyData = $stmt->fetch(PDO::FETCH_ASSOC);
+
+if (!$keyData || intval($keyData['is_active']) !== 1) {
+    jsonResponse(['error' => 'Invalid or inactive API key'], 401);
+}
+
+if (!empty($keyData['expires_at']) && strtotime($keyData['expires_at']) < time()) {
+    jsonResponse([
+        'error' => 'API key expired',
+        'expired_at' => $keyData['expires_at']
+    ], 403);
+}
+
+$bucket = currentMinuteBucket();
+if (($keyData['minute_bucket'] ?? '') !== $bucket) {
+    $db->prepare("UPDATE api_keys SET requests_this_minute = 0, minute_bucket = ? WHERE id = ?")->execute([$bucket, $keyData['id']]);
+    $keyData['requests_this_minute'] = 0;
+    $keyData['minute_bucket'] = $bucket;
+}
+
+if (intval($keyData['requests_today']) >= intval($keyData['limit_per_day'])) {
+    jsonResponse([
+        'error' => 'Daily rate limit exceeded',
+        'limit_per_day' => intval($keyData['limit_per_day'])
+    ], 429);
+}
+
+if (intval($keyData['requests_this_minute']) >= intval($keyData['rpm_limit'])) {
+    jsonResponse([
+        'error' => 'Per-minute rate limit exceeded',
+        'rpm_limit' => intval($keyData['rpm_limit']),
+        'minute_bucket' => $bucket
+    ], 429);
+}
+
+$body = getJsonBody();
 $prompt = trim($body['prompt'] ?? '');
-$model  = $body['model']  ?? 'devil-ai';
-$tools  = $body['tools']  ?? null; // null = auto-detect
-
-if (empty($prompt)) {
-    http_response_code(400);
-    echo json_encode(['error' => 'prompt is required']);
-    exit;
+$model = trim($body['model'] ?? 'devil-ai');
+$tools = $body['tools'] ?? null;
+if ($prompt === '') {
+    jsonResponse(['error' => 'prompt is required'], 400);
 }
 
-// --- Tool Detection ---
 if ($tools === null) {
     $tools = autoDetectTools($prompt);
 }
+if (!is_array($tools)) $tools = [];
 
-// --- Execute Tools ---
 $toolContext = '';
 foreach ($tools as $tool) {
     switch ($tool) {
-        case 'weather':    $toolContext .= getWeatherContext($prompt);  break;
-        case 'news':       $toolContext .= getNewsContext($prompt);      break;
-        case 'github':     $toolContext .= getGitHubContext($prompt);    break;
-        case 'web_search': $toolContext .= getDDGContext($prompt);       break;
-        case 'reddit':     $toolContext .= getRedditContext($prompt);    break;
-        case 'datetime':   $toolContext .= getDateTimeContext();         break;
+        case 'weather':    $toolContext .= getWeatherContext($prompt); break;
+        case 'news':       $toolContext .= getNewsContext($prompt); break;
+        case 'github':     $toolContext .= getGitHubContext($prompt); break;
+        case 'web_search': $toolContext .= getDDGContext($prompt); break;
+        case 'reddit':     $toolContext .= getRedditContext($prompt); break;
+        case 'datetime':   $toolContext .= getDateTimeContext(); break;
     }
 }
 
-// --- Build Enriched Prompt ---
 $finalPrompt = $toolContext
-    ? "You have access to the following real-time data:\n\n{$toolContext}\nAnswer the user's question using this data.\nUser: {$prompt}"
+    ? "You have access to the following real-time data:\n\n{$toolContext}\nUse it to answer the user clearly.\nUser: {$prompt}"
     : $prompt;
 
-// --- Call Ollama ---
+$timeout = max(10, intval($keyData['timeout_seconds'] ?: 60));
 $startTime = microtime(true);
-
 $ollamaData = ['model' => $model, 'prompt' => $finalPrompt, 'stream' => false];
+
 $ch = curl_init();
 curl_setopt($ch, CURLOPT_URL, OLLAMA_URL . '/api/generate');
 curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 curl_setopt($ch, CURLOPT_POST, true);
-curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
 curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
 curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($ollamaData));
 $ollamaResponse = curl_exec($ch);
 $curlError = curl_error($ch);
+$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 curl_close($ch);
-
 $responseTimeMs = round((microtime(true) - $startTime) * 1000);
 
-if ($curlError) {
-    http_response_code(502);
-    echo json_encode(['error' => 'Model unreachable: ' . $curlError]);
-    exit;
+if ($curlError || !$ollamaResponse || $httpCode >= 500) {
+    $db->prepare("INSERT INTO request_logs (api_key, app_name, client_name, client_email, model, prompt, tools_used, response_time_ms, status, ip_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'error', ?)")
+       ->execute([$apiKey, $keyData['app_name'], $keyData['client_name'], $keyData['client_email'], $model, substr($prompt,0,500), implode(',', $tools), $responseTimeMs, clientIp()]);
+    jsonResponse(['error' => 'Model server unreachable'], 502);
 }
 
 $ollamaJson = json_decode($ollamaResponse, true);
-$aiResponse  = $ollamaJson['response'] ?? 'No response from model.';
+$aiResponse = $ollamaJson['response'] ?? 'No response from model.';
 
-// --- Update Usage Stats ---
-try {
-    $db->prepare("
-        UPDATE api_keys
-        SET requests_today = requests_today + 1,
-            total_requests = total_requests + 1
-        WHERE api_key = ?
-    ")->execute([$apiKey]);
+$db->prepare("UPDATE api_keys SET requests_today = requests_today + 1, total_requests = total_requests + 1, requests_this_minute = requests_this_minute + 1, last_used_at = NOW() WHERE id = ?")
+   ->execute([$keyData['id']]);
 
-    $db->prepare("
-        INSERT INTO request_logs
-        (api_key, model, prompt, tools_used, response_time_ms, status, ip_address)
-        VALUES (?, ?, ?, ?, ?, 'success', ?)
-    ")->execute([
-        $apiKey, $model,
-        substr($prompt, 0, 500),
-        implode(',', $tools),
-        $responseTimeMs,
-        $_SERVER['REMOTE_ADDR'] ?? ''
-    ]);
-} catch (Exception $e) { /* log silently */ }
+$db->prepare("INSERT INTO request_logs (api_key, app_name, client_name, client_email, model, prompt, tools_used, response_time_ms, status, ip_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'success', ?)")
+   ->execute([$apiKey, $keyData['app_name'], $keyData['client_name'], $keyData['client_email'], $model, substr($prompt,0,500), implode(',', $tools), $responseTimeMs, clientIp()]);
 
-// --- Return Response ---
-echo json_encode([
-    'response'    => $aiResponse,
-    'model'       => $model,
-    'tools_used'  => $tools,
+jsonResponse([
+    'response' => $aiResponse,
+    'model' => $model,
+    'tools_used' => $tools,
+    'client' => [
+        'app_name' => $keyData['app_name'],
+        'client_name' => $keyData['client_name'],
+        'plan_name' => $keyData['plan_name'],
+        'speed_tier' => $keyData['speed_tier']
+    ],
     'usage' => [
-        'requests_today' => $keyData['requests_today'] + 1,
-        'limit_per_day'  => $keyData['limit_per_day'],
-        'response_ms'    => $responseTimeMs
+        'requests_today' => intval($keyData['requests_today']) + 1,
+        'limit_per_day' => intval($keyData['limit_per_day']),
+        'requests_this_minute' => intval($keyData['requests_this_minute']) + 1,
+        'rpm_limit' => intval($keyData['rpm_limit']),
+        'response_ms' => $responseTimeMs,
+        'expires_at' => $keyData['expires_at']
     ]
 ]);
 
-// ============================================
-// TOOL FUNCTIONS
-// ============================================
-
 function autoDetectTools($prompt) {
     $tools = [];
-    if (preg_match('/weather|temperature|rain|forecast|humid|wind/i', $prompt))   $tools[] = 'weather';
-    if (preg_match('/news|latest|breaking|headline|today|happened/i', $prompt))   $tools[] = 'news';
-    if (preg_match('/github|repo|repository|code|library|package/i', $prompt))    $tools[] = 'github';
-    if (preg_match('/reddit|community|discussion|post|subreddit/i', $prompt))     $tools[] = 'reddit';
+    if (preg_match('/weather|temperature|rain|forecast|humid|wind/i', $prompt)) $tools[] = 'weather';
+    if (preg_match('/news|latest|breaking|headline|today|happened/i', $prompt)) $tools[] = 'news';
+    if (preg_match('/github|repo|repository|code|library|package/i', $prompt)) $tools[] = 'github';
+    if (preg_match('/reddit|community|discussion|post|subreddit/i', $prompt)) $tools[] = 'reddit';
     if (preg_match('/\bdate\b|\btime\b|\bday\b|\byear\b|\bnow\b|today/i', $prompt)) $tools[] = 'datetime';
     if (empty($tools) && preg_match('/search|find|who is|what is|how to|define/i', $prompt)) $tools[] = 'web_search';
     return $tools;
 }
-
 function getWeatherContext($prompt) {
     preg_match('/weather\s+(?:in\s+)?([a-zA-Z\s,]+?)(?:\?|$|today|now)/i', $prompt, $m);
     $city = isset($m[1]) ? trim($m[1]) : 'Kolkata';
-    $url  = 'https://wttr.in/' . urlencode($city) . '?format=j1';
+    $url = 'https://wttr.in/' . urlencode($city) . '?format=j1';
     $data = @json_decode(@file_get_contents($url), true);
     if (!$data) return '';
-    $c    = $data['current_condition'][0] ?? [];
-    $temp = $c['temp_C'] ?? 'N/A';
-    $desc = $c['weatherDesc'][0]['value'] ?? '';
-    $hum  = $c['humidity'] ?? '';
-    return "[Weather in {$city}]: {$temp}°C, {$desc}, Humidity: {$hum}%\n";
+    $c = $data['current_condition'][0] ?? [];
+    return "[Weather in {$city}]: " . ($c['temp_C'] ?? 'N/A') . "°C, " . ($c['weatherDesc'][0]['value'] ?? '') . ", Humidity: " . ($c['humidity'] ?? '') . "%\n";
 }
-
 function getNewsContext($prompt) {
     preg_match('/news\s+(?:about\s+)?(.+?)(?:\?|$)/i', $prompt, $m);
     $query = isset($m[1]) ? trim($m[1]) : $prompt;
-    $url   = 'https://news.google.com/rss/search?q=' . urlencode($query) . '&hl=en-IN&gl=IN&ceid=IN:en';
-    $xml   = @simplexml_load_file($url);
+    $xml = @simplexml_load_file('https://news.google.com/rss/search?q=' . urlencode($query) . '&hl=en-IN&gl=IN&ceid=IN:en');
     if (!$xml) return '';
     $items = [];
-    foreach (array_slice((array)($xml->channel->item ?? []), 0, 4) as $item) {
-        $items[] = (string)($item->title ?? '');
-    }
+    foreach (array_slice((array)($xml->channel->item ?? []), 0, 4) as $item) $items[] = (string)($item->title ?? '');
     return $items ? '[Latest News]: ' . implode(' | ', $items) . "\n" : '';
 }
-
 function getGitHubContext($prompt) {
     preg_match('/(?:github|repo|library|package)\s+(?:for\s+)?(.+?)(?:\?|$)/i', $prompt, $m);
     $query = isset($m[1]) ? trim($m[1]) : $prompt;
-    $url   = 'https://api.github.com/search/repositories?q=' . urlencode($query) . '&per_page=3&sort=stars';
-    $opts  = ['http' => ['header' => "User-Agent: DevilAI-Gateway/1.0\r\n"]];
-    $data  = @json_decode(@file_get_contents($url, false, stream_context_create($opts)), true);
+    $opts = ['http' => ['header' => "User-Agent: DevilAI-Gateway/2.0\r\n"]];
+    $data = @json_decode(@file_get_contents('https://api.github.com/search/repositories?q=' . urlencode($query) . '&per_page=3&sort=stars', false, stream_context_create($opts)), true);
     if (!$data || empty($data['items'])) return '';
     $repos = array_map(fn($r) => "{$r['full_name']} ⭐{$r['stargazers_count']} — {$r['description']}", $data['items']);
     return '[GitHub Top Repos]: ' . implode(' | ', $repos) . "\n";
 }
-
 function getDDGContext($prompt) {
-    $url  = 'https://api.duckduckgo.com/?q=' . urlencode($prompt) . '&format=json&no_redirect=1&no_html=1';
-    $data = @json_decode(@file_get_contents($url), true);
+    $data = @json_decode(@file_get_contents('https://api.duckduckgo.com/?q=' . urlencode($prompt) . '&format=json&no_redirect=1&no_html=1'), true);
     $text = $data['AbstractText'] ?? $data['Answer'] ?? '';
     return $text ? "[Web Search]: {$text}\n" : '';
 }
-
 function getRedditContext($prompt) {
-    $url  = 'https://www.reddit.com/search.json?q=' . urlencode($prompt) . '&sort=hot&limit=3';
-    $opts = ['http' => ['header' => "User-Agent: DevilAI-Gateway/1.0\r\n"]];
-    $data = @json_decode(@file_get_contents($url, false, stream_context_create($opts)), true);
+    $opts = ['http' => ['header' => "User-Agent: DevilAI-Gateway/2.0\r\n"]];
+    $data = @json_decode(@file_get_contents('https://www.reddit.com/search.json?q=' . urlencode($prompt) . '&sort=hot&limit=3', false, stream_context_create($opts)), true);
     $posts = $data['data']['children'] ?? [];
     if (!$posts) return '';
     $titles = array_map(fn($p) => $p['data']['title'] ?? '', array_slice($posts, 0, 3));
     return '[Reddit Discussions]: ' . implode(' | ', $titles) . "\n";
 }
-
-function getDateTimeContext() {
-    return '[Current Date/Time]: ' . date('l, d F Y H:i:s T') . "\n";
-}
+function getDateTimeContext() { return '[Current Date/Time]: ' . date('l, d F Y H:i:s T') . "\n"; }

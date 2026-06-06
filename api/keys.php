@@ -1,51 +1,54 @@
 <?php
-// ============================================
-// Devil AI Gateway — API Key Generation
-// POST /api/v1/keys/create
-// ============================================
-
 require_once __DIR__ . '/config.php';
 
-$body  = json_decode(file_get_contents('php://input'), true);
-$name  = trim($body['name']  ?? '');
-$email = trim($body['email'] ?? '');
-$limit = intval($body['limit_per_day'] ?? 100);
+$body = getJsonBody();
+$name = trim($body['client_name'] ?? '');
+$email = trim($body['client_email'] ?? '');
+$appName = trim($body['app_name'] ?? '');
+$amount = floatval($body['subscription_amount_inr'] ?? 0);
+$planName = trim($body['plan_name'] ?? 'Starter');
+$speedTier = strtolower(trim($body['speed_tier'] ?? 'normal'));
+$limitPerDay = intval($body['limit_per_day'] ?? 100);
+$validDays = intval($body['valid_days'] ?? 30);
+$rpmLimit = intval($body['rpm_limit'] ?? 0);
+$expiresAt = trim($body['expires_at'] ?? '');
 
-if (!$name || !$email) {
-    http_response_code(400);
-    echo json_encode(['error' => 'name and email are required']);
-    exit;
+if ($name === '' || $email === '' || $appName === '') {
+    jsonResponse(['error' => 'client_name, client_email and app_name are required'], 400);
 }
 
-// Generate unique key
-$key = 'dk_live_' . bin2hex(random_bytes(16));
+$tier = speedTierConfig($speedTier);
+if ($rpmLimit <= 0) $rpmLimit = $tier['rpm'];
+$timeout = $tier['timeout'];
+if ($expiresAt === '') $expiresAt = date('Y-m-d H:i:s', strtotime('+' . max(1, $validDays) . ' days'));
+
+$key = generateApiKey();
 
 try {
     $db = getDB();
-    // Check if email already has a key
-    $stmt = $db->prepare("SELECT api_key FROM api_keys WHERE email=?");
-    $stmt->execute([$email]);
-    if ($existing = $stmt->fetch()) {
-        echo json_encode([
-            'message'  => 'Key already exists for this email',
-            'api_key'  => $existing['api_key'],
-            'docs_url' => GATEWAY_DOMAIN . '/docs/'
-        ]);
-        exit;
-    }
-    $db->prepare("
-        INSERT INTO api_keys (name, email, api_key, limit_per_day, last_reset)
-        VALUES (?, ?, ?, ?, CURDATE())
-    ")->execute([$name, $email, $key, $limit]);
+    $stmt = $db->prepare("INSERT INTO api_keys (name, email, client_name, client_email, app_name, api_key, subscription_amount_inr, currency, plan_name, speed_tier, rpm_limit, timeout_seconds, limit_per_day, expires_at, last_reset, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE(), 1)");
+    $stmt->execute([$name, $email, $name, $email, $appName, $key, $amount, DEFAULT_CURRENCY, $planName, $speedTier, $rpmLimit, $timeout, $limitPerDay, $expiresAt]);
 
-    echo json_encode([
-        'message'      => 'API key created successfully',
-        'api_key'      => $key,
-        'limit_per_day'=> $limit,
-        'docs_url'     => GATEWAY_DOMAIN . '/docs/',
-        'endpoint'     => GATEWAY_DOMAIN . '/api/v1/chat'
-    ]);
+    jsonResponse([
+        'message' => 'API key created successfully',
+        'api_key' => $key,
+        'client' => [
+            'client_name' => $name,
+            'client_email' => $email,
+            'app_name' => $appName
+        ],
+        'subscription' => [
+            'plan_name' => $planName,
+            'subscription_amount_inr' => $amount,
+            'speed_tier' => $speedTier,
+            'rpm_limit' => $rpmLimit,
+            'limit_per_day' => $limitPerDay,
+            'expires_at' => $expiresAt
+        ],
+        'docs_url' => GATEWAY_DOMAIN . '/docs/',
+        'api_base_url' => GATEWAY_DOMAIN . '/api/v1',
+        'validate_url' => GATEWAY_DOMAIN . '/api/v1/keys/validate'
+    ], 201);
 } catch (Exception $e) {
-    http_response_code(500);
-    echo json_encode(['error' => 'Could not create key: ' . $e->getMessage()]);
+    jsonResponse(['error' => 'Could not create key: ' . $e->getMessage()], 500);
 }

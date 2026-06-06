@@ -1,121 +1,18 @@
 <?php
-// ============================================
-// Devil AI Gateway — Admin Dashboard
-// ============================================
-
 require_once __DIR__ . '/../api/config.php';
 session_start();
-
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
-    if ($_POST['password'] === ADMIN_PASSWORD) {
-        $_SESSION['admin'] = true;
-    } else {
-        $error = 'Wrong password';
-    }
+    if ($_POST['password'] === ADMIN_PASSWORD) $_SESSION['admin'] = true;
+    else $error = 'Wrong password';
 }
-
-if (isset($_POST['logout'])) {
-    session_destroy();
-    header('Location: index.php');
-    exit;
-}
-
+if (isset($_POST['logout'])) { session_destroy(); header('Location: index.php'); exit; }
 if (!isset($_SESSION['admin'])): ?>
-<!DOCTYPE html><html><head><title>Admin Login — Devil AI</title>
-<style>body{font-family:sans-serif;background:#0a0a0a;color:#fff;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}
-.box{background:#111;padding:40px;border-radius:10px;border:1px solid #ff4444;min-width:300px;}
-input{width:100%;padding:10px;margin:10px 0;background:#222;border:1px solid #444;color:#fff;border-radius:5px;box-sizing:border-box;}
-.btn{width:100%;background:#ff4444;color:#fff;border:none;padding:12px;font-size:16px;cursor:pointer;border-radius:5px;}
-.err{color:#ff4444;}</style></head><body>
-<div class="box">
-<h2 style="color:#ff4444;text-align:center">😈 Devil AI Admin</h2>
-<?php if (isset($error)) echo "<p class='err'>$error</p>"; ?>
-<form method="POST">
-<input type="password" name="password" placeholder="Admin Password" required>
-<button class="btn">Login</button>
-</form></div></body></html>
-<?php exit; endif;
-
-// Fetch stats
-try {
-    $db = getDB();
-    $totalKeys    = $db->query("SELECT COUNT(*) FROM api_keys")->fetchColumn();
-    $activeKeys   = $db->query("SELECT COUNT(*) FROM api_keys WHERE is_active=1")->fetchColumn();
-    $totalReqs    = $db->query("SELECT SUM(total_requests) FROM api_keys")->fetchColumn();
-    $todayReqs    = $db->query("SELECT SUM(requests_today) FROM api_keys")->fetchColumn();
-    $recentLogs   = $db->query("SELECT * FROM request_logs ORDER BY created_at DESC LIMIT 10")->fetchAll(PDO::FETCH_ASSOC);
-    $keys         = $db->query("SELECT * FROM api_keys ORDER BY created_at DESC")->fetchAll(PDO::FETCH_ASSOC);
-} catch(Exception $e) { $dbError = $e->getMessage(); }
+<!DOCTYPE html><html><head><title>Admin Login</title><style>body{font-family:Arial;background:#0b1020;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}.box{background:#111827;padding:30px;border-radius:14px;border:1px solid #1f2937;min-width:320px}input{width:100%;padding:12px;background:#0f172a;border:1px solid #334155;color:#fff;border-radius:8px;box-sizing:border-box;margin:10px 0}.btn{width:100%;padding:12px;background:#ef4444;color:#fff;border:none;border-radius:8px;font-weight:700;cursor:pointer}.e{color:#fca5a5}</style></head><body><div class="box"><h2>🔐 Devil AI Admin</h2><?php if(isset($error)) echo '<p class="e">'.$error.'</p>'; ?><form method="post"><input type="password" name="password" placeholder="Admin password" required><button class="btn">Login</button></form></div></body></html><?php exit; endif;
+$db = getDB();
+$totalKeys = $db->query("SELECT COUNT(*) FROM api_keys")->fetchColumn();
+$activeKeys = $db->query("SELECT COUNT(*) FROM api_keys WHERE is_active = 1")->fetchColumn();
+$totalRevenue = $db->query("SELECT COALESCE(SUM(subscription_amount_inr),0) FROM api_keys WHERE is_active = 1")->fetchColumn();
+$totalReqs = $db->query("SELECT COALESCE(SUM(total_requests),0) FROM api_keys")->fetchColumn();
+$clients = $db->query("SELECT * FROM api_keys ORDER BY created_at DESC LIMIT 50")->fetchAll(PDO::FETCH_ASSOC);
 ?>
-<!DOCTYPE html><html><head><title>Admin — Devil AI Gateway</title>
-<style>
-body{font-family:sans-serif;background:#0a0a0a;color:#eee;margin:0;padding:0;}
-.nav{background:#ff4444;padding:15px 30px;display:flex;justify-content:space-between;align-items:center;}
-.nav h1{margin:0;color:#fff;font-size:20px;} .nav a{color:#fff;text-decoration:none;margin-left:15px;}
-.container{padding:30px;}
-.cards{display:flex;gap:20px;flex-wrap:wrap;margin-bottom:30px;}
-.card{background:#111;border:1px solid #333;border-radius:10px;padding:20px;min-width:150px;text-align:center;}
-.card .num{font-size:36px;font-weight:bold;color:#ff4444;}
-.card .lbl{color:#888;font-size:13px;}
-table{width:100%;border-collapse:collapse;background:#111;border-radius:8px;overflow:hidden;}
-th{background:#ff4444;color:#fff;padding:10px;text-align:left;font-size:13px;}
-td{padding:10px;border-bottom:1px solid #222;font-size:13px;}
-tr:hover td{background:#1a1a1a;}
-.badge{padding:3px 8px;border-radius:4px;font-size:11px;}
-.active{background:#1a4a2a;color:#00ff88;} .inactive{background:#4a1a1a;color:#ff4444;}
-h2{color:#ff4444;margin-top:30px;}
-.btn-sm{background:#ff4444;color:#fff;border:none;padding:5px 10px;cursor:pointer;border-radius:4px;font-size:12px;}
-</style></head><body>
-<div class="nav">
-    <h1>😈 Devil AI Gateway — Admin</h1>
-    <div>
-        <a href="keys.php">🔑 Keys</a>
-        <a href="logs.php">📋 Logs</a>
-        <a href="../docs/">📚 Docs</a>
-        <form method="POST" style="display:inline"><button name="logout" style="background:none;border:none;color:#fff;cursor:pointer;margin-left:15px;">Logout</button></form>
-    </div>
-</div>
-<div class="container">
-<?php if (isset($dbError)): ?>
-    <p style="color:#ff4444">DB Error: <?= htmlspecialchars($dbError) ?></p>
-<?php else: ?>
-<div class="cards">
-    <div class="card"><div class="num"><?= $totalKeys ?></div><div class="lbl">Total API Keys</div></div>
-    <div class="card"><div class="num"><?= $activeKeys ?></div><div class="lbl">Active Keys</div></div>
-    <div class="card"><div class="num"><?= number_format($totalReqs ?? 0) ?></div><div class="lbl">Total Requests</div></div>
-    <div class="card"><div class="num"><?= number_format($todayReqs ?? 0) ?></div><div class="lbl">Today's Requests</div></div>
-</div>
-
-<h2>🔑 API Keys</h2>
-<table>
-<tr><th>Name</th><th>Email</th><th>API Key</th><th>Today</th><th>Limit/Day</th><th>Total</th><th>Status</th></tr>
-<?php foreach ($keys as $k): ?>
-<tr>
-    <td><?= htmlspecialchars($k['name']) ?></td>
-    <td><?= htmlspecialchars($k['email']) ?></td>
-    <td style="font-family:monospace;font-size:11px"><?= htmlspecialchars($k['api_key']) ?></td>
-    <td><?= $k['requests_today'] ?></td>
-    <td><?= $k['limit_per_day'] ?></td>
-    <td><?= $k['total_requests'] ?></td>
-    <td><span class="badge <?= $k['is_active'] ? 'active' : 'inactive' ?>"><?= $k['is_active'] ? 'Active' : 'Inactive' ?></span></td>
-</tr>
-<?php endforeach; ?>
-</table>
-
-<h2>📋 Recent Requests</h2>
-<table>
-<tr><th>Time</th><th>Key</th><th>Model</th><th>Tools</th><th>Prompt</th><th>Time(ms)</th><th>IP</th></tr>
-<?php foreach ($recentLogs as $log): ?>
-<tr>
-    <td><?= $log['created_at'] ?></td>
-    <td style="font-family:monospace;font-size:10px"><?= substr($log['api_key'],0,20).'...' ?></td>
-    <td><?= htmlspecialchars($log['model']) ?></td>
-    <td><?= htmlspecialchars($log['tools_used']) ?></td>
-    <td><?= htmlspecialchars(substr($log['prompt'],0,50)) ?>...</td>
-    <td><?= $log['response_time_ms'] ?></td>
-    <td><?= $log['ip_address'] ?></td>
-</tr>
-<?php endforeach; ?>
-</table>
-<?php endif; ?>
-</div></body></html>
+<!DOCTYPE html><html><head><title>Admin Dashboard</title><style>body{font-family:Arial;background:#0b1020;color:#e5e7eb;margin:0}.nav{background:#111827;padding:16px 24px;display:flex;justify-content:space-between;align-items:center}.nav a{color:#cbd5e1;text-decoration:none;margin-left:14px}.wrap{padding:24px}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.card{background:#111827;border:1px solid #1f2937;border-radius:14px;padding:20px}.n{font-size:30px;font-weight:800;color:#fff}.l{color:#94a3b8;font-size:13px;margin-top:6px}table{width:100%;border-collapse:collapse;background:#111827;border:1px solid #1f2937;border-radius:14px;overflow:hidden;margin-top:18px}th,td{padding:12px;border-bottom:1px solid #1f2937;text-align:left;font-size:13px}.tag{padding:3px 8px;border-radius:6px;font-size:11px}.on{background:#123b24;color:#86efac}.off{background:#3b1219;color:#fca5a5}@media(max-width:900px){.stats{grid-template-columns:1fr 1fr}}</style></head><body><div class="nav"><div><strong>😈 Devil AI Admin</strong></div><div><a href="keys.php">Keys</a><a href="../docs/">Docs</a><form method="post" style="display:inline"><button name="logout" style="background:none;border:none;color:#fff;cursor:pointer;margin-left:14px">Logout</button></form></div></div><div class="wrap"><div class="stats"><div class="card"><div class="n"><?= $totalKeys ?></div><div class="l">Total Keys</div></div><div class="card"><div class="n"><?= $activeKeys ?></div><div class="l">Active Keys</div></div><div class="card"><div class="n">₹<?= number_format((float)$totalRevenue,2) ?></div><div class="l">Active Revenue</div></div><div class="card"><div class="n"><?= number_format((int)$totalReqs) ?></div><div class="l">Total Requests</div></div></div><table><tr><th>App</th><th>Client</th><th>Email</th><th>Plan</th><th>Amount</th><th>Speed</th><th>RPM</th><th>Daily</th><th>Expiry</th><th>Status</th></tr><?php foreach($clients as $c): ?><tr><td><?= htmlspecialchars($c['app_name']) ?></td><td><?= htmlspecialchars($c['client_name']) ?></td><td><?= htmlspecialchars($c['client_email']) ?></td><td><?= htmlspecialchars($c['plan_name']) ?></td><td>₹<?= number_format((float)$c['subscription_amount_inr'],2) ?></td><td><?= htmlspecialchars($c['speed_tier']) ?></td><td><?= (int)$c['rpm_limit'] ?></td><td><?= (int)$c['limit_per_day'] ?></td><td><?= htmlspecialchars((string)$c['expires_at']) ?></td><td><span class="tag <?= (int)$c['is_active']===1?'on':'off' ?>"><?= (int)$c['is_active']===1?'Active':'Disabled' ?></span></td></tr><?php endforeach; ?></table></div></body></html>
