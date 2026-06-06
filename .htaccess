@@ -1,0 +1,22 @@
+RewriteEngine On
+
+# Route /api/v1/* to api/index.php
+RewriteRule ^api/v1/(.*)$ api/index.php?route=$1 [QSA,L]
+
+# Route /docs to docs/index.php
+RewriteRule ^docs/?$ docs/index.php [QSA,L]
+
+# Route /admin to admin/index.php
+RewriteRule ^admin/?$ admin/index.php [QSA,L]
+RewriteRule ^admin/(.*)$ admin/$1 [QSA,L]
+
+# Block direct .env access
+<Files ".env">
+    Order Allow,Deny
+    Deny from all
+</Files>
+
+# Security headers
+Header always set X-Content-Type-Options nosniff
+Header always set X-Frame-Options DENY
+Header always set X-XSS-Protection "1; mode=block"
